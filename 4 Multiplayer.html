@@ -1,0 +1,595 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>🎮 P2P Arena – WebRTC Multiplayer Game</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            user-select: none;
+        }
+
+        body {
+            background: linear-gradient(135deg, #0b1120 0%, #19223c 100%);
+            font-family: 'Segoe UI', 'Inter', system-ui, monospace;
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+
+        .game-container {
+            background: #0f172ad9;
+            backdrop-filter: blur(4px);
+            border-radius: 32px;
+            padding: 20px;
+            box-shadow: 0 25px 40px rgba(0,0,0,0.5);
+            border: 1px solid rgba(255,255,255,0.15);
+        }
+
+        canvas {
+            display: block;
+            margin: 0 auto;
+            border-radius: 20px;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.3);
+            cursor: crosshair;
+            background: #1e293b;
+        }
+
+        .control-panel {
+            margin-top: 18px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 12px;
+            justify-content: center;
+            align-items: center;
+            background: rgba(15,23,42,0.7);
+            padding: 12px 20px;
+            border-radius: 60px;
+            backdrop-filter: blur(8px);
+        }
+
+        button {
+            background: #2d3b5a;
+            border: none;
+            color: white;
+            font-weight: 600;
+            padding: 8px 20px;
+            border-radius: 40px;
+            cursor: pointer;
+            transition: 0.2s;
+            font-family: monospace;
+            font-size: 14px;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+        button.primary { background: #3b82f6; box-shadow: 0 0 6px #3b82f680; }
+        button.primary:hover { background: #2563eb; transform: scale(1.02);}
+        button:hover { background: #3b4e72; transform: scale(0.98);}
+        .status-badge {
+            background: #0f172a;
+            padding: 6px 16px;
+            border-radius: 32px;
+            color: #94a3b8;
+            font-family: monospace;
+            font-size: 13px;
+            font-weight: bold;
+        }
+        .status-badge.connected { color: #4ade80; background: #064e3b; }
+        .invite-area {
+            background: #0a0f1c;
+            border-radius: 32px;
+            padding: 12px 18px;
+            font-size: 12px;
+            font-family: monospace;
+            display: inline-flex;
+            gap: 10px;
+            align-items: center;
+            flex-wrap: wrap;
+            max-width: 100%;
+        }
+        input, textarea {
+            background: #020617;
+            border: 1px solid #334155;
+            padding: 8px 14px;
+            border-radius: 32px;
+            color: white;
+            font-family: monospace;
+            font-size: 12px;
+            width: 260px;
+            outline: none;
+        }
+        .scoreboard {
+            background: #00000066;
+            border-radius: 32px;
+            padding: 6px 16px;
+            font-weight: bold;
+            font-family: monospace;
+            color: #facc15;
+        }
+        hr { border-color: #334155; margin: 4px 0; }
+        .flex { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; justify-content: center; }
+    </style>
+</head>
+<body>
+<div class="game-container">
+    <canvas id="gameCanvas" width="900" height="600"></canvas>
+
+    <div class="control-panel">
+        <div class="status-badge" id="connStatus">⚡ OFFLINE</div>
+        <div class="scoreboard" id="scoreDisplay">🏆 YOU: 0  |  ENEMY: 0</div>
+        <button id="createRoomBtn" class="primary">🎲 CREATE ARENA (HOST)</button>
+        <div class="invite-area" id="inviteArea" style="display:none;">
+            <span>🔗 SHARE LINK:</span>
+            <input type="text" id="inviteLinkInput" readonly size="40">
+            <button id="copyLinkBtn">📋 COPY</button>
+        </div>
+        <button id="resetConnBtn">🔄 RESET</button>
+    </div>
+    <div class="flex" style="margin-top: 12px;">
+        <details style="color:#cbd5e1; font-size:12px; background:#0f172a80; border-radius:24px; padding:6px 12px;">
+            <summary>📡 PEER INVITE MANUAL (if link auto fails)</summary>
+            <div style="margin-top:8px;">
+                <div><strong>HOST:</strong> Create room → copy "ANSWER CODE" after guest joins → paste below → Apply Answer</div>
+                <textarea id="manualAnswerInput" rows="2" placeholder="Paste guest's answer SDP here..." style="width:300px;"></textarea>
+                <button id="applyAnswerBtn">✅ APPLY ANSWER</button>
+                <hr>
+                <div><strong>GUEST:</strong> Paste host's invite (auto from link) or paste OFFER SDP:</div>
+                <textarea id="manualOfferInput" rows="2" placeholder="Paste host offer SDP..."></textarea>
+                <button id="applyOfferBtn">📩 APPLY OFFER & GENERATE ANSWER</button>
+                <div id="generatedAnswerArea" style="margin-top:6px;"></div>
+            </div>
+        </details>
+    </div>
+</div>
+
+<script>
+    // ----------------------------- WEBRTC P2P MANAGER ---------------------------------
+    const configuration = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
+    let peerConnection = null;
+    let dataChannel = null;
+    let connectionState = "disconnected"; // connecting, connected, failed
+    let localPlayerId = Math.random().toString(36).substring(2, 8);
+    let remotePlayerId = null;
+    let isHost = false;      // host creates data channel
+    let pendingAnswerFromGuest = null;
+    let localOfferSdp = null;
+
+    // Game state
+    let localPlayer = { x: 250, y: 300, radius: 18, score: 0 };
+    let remotePlayer = { x: 650, y: 300, radius: 18, score: 0, id: null };
+    let bullets = [];          // each bullet: { x, y, vx, vy, ownerId, radius: 5 }
+    let keys = { w: false, s: false, a: false, d: false };
+    let mouseX = 400, mouseY = 300;
+    let lastSentTime = 0;
+    let animationId = null;
+    let remoteLatency = 0;
+
+    // DOM elements
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    const connStatusDiv = document.getElementById('connStatus');
+    const scoreDisplay = document.getElementById('scoreDisplay');
+    const createRoomBtn = document.getElementById('createRoomBtn');
+    const inviteArea = document.getElementById('inviteArea');
+    const inviteLinkInput = document.getElementById('inviteLinkInput');
+    const copyLinkBtn = document.getElementById('copyLinkBtn');
+    const resetConnBtn = document.getElementById('resetConnBtn');
+    const manualAnswerInput = document.getElementById('manualAnswerInput');
+    const applyAnswerBtn = document.getElementById('applyAnswerBtn');
+    const manualOfferInput = document.getElementById('manualOfferInput');
+    const applyOfferBtn = document.getElementById('applyOfferBtn');
+    const generatedAnswerArea = document.getElementById('generatedAnswerArea');
+
+    // Helper: update status UI
+    function updateStatusUI() {
+        if (connectionState === "connected") {
+            connStatusDiv.innerText = "🔗 CONNECTED";
+            connStatusDiv.classList.add("connected");
+        } else if (connectionState === "connecting") {
+            connStatusDiv.innerText = "🔄 CONNECTING...";
+            connStatusDiv.classList.remove("connected");
+        } else {
+            connStatusDiv.innerText = "⚡ OFFLINE";
+            connStatusDiv.classList.remove("connected");
+        }
+    }
+
+    // Send game data (position, shoot)
+    function sendGameMessage(type, payload) {
+        if (dataChannel && dataChannel.readyState === "open") {
+            dataChannel.send(JSON.stringify({ type, ...payload, senderId: localPlayerId }));
+        }
+    }
+
+    // Send local player position (throttled)
+    function sendPositionUpdate() {
+        if (!dataChannel || dataChannel.readyState !== "open") return;
+        sendGameMessage("move", { x: localPlayer.x, y: localPlayer.y });
+    }
+
+    // Shoot bullet
+    function shootBullet(targetX, targetY) {
+        const dx = targetX - localPlayer.x;
+        const dy = targetY - localPlayer.y;
+        const len = Math.hypot(dx, dy);
+        if (len < 0.01) return;
+        const vx = (dx / len) * 8;
+        const vy = (dy / len) * 8;
+        const bullet = {
+            x: localPlayer.x, y: localPlayer.y, vx, vy,
+            radius: 5, ownerId: localPlayerId, life: true
+        };
+        bullets.push(bullet);
+        // notify remote
+        sendGameMessage("shoot", { fromX: localPlayer.x, fromY: localPlayer.y, angleVX: vx, angleVY: vy });
+    }
+
+    // Apply received remote shoot
+    function applyRemoteShoot(payload) {
+        bullets.push({
+            x: payload.fromX, y: payload.fromY,
+            vx: payload.angleVX, vy: payload.angleVY,
+            radius: 5, ownerId: payload.senderId, life: true
+        });
+    }
+
+    // Collision & update bullets / scores
+    function updateGame() {
+        // move local player
+        let move = false;
+        if (keys.w) { localPlayer.y -= 5; move = true; }
+        if (keys.s) { localPlayer.y += 5; move = true; }
+        if (keys.a) { localPlayer.x -= 5; move = true; }
+        if (keys.d) { localPlayer.x += 5; move = true; }
+        if (move) {
+            localPlayer.x = Math.min(Math.max(localPlayer.x, 25), canvas.width - 25);
+            localPlayer.y = Math.min(Math.max(localPlayer.y, 25), canvas.height - 25);
+            // send position with throttling (60fps but limit sends to 20/sec)
+            if (!lastSentTime || performance.now() - lastSentTime > 45) {
+                sendPositionUpdate();
+                lastSentTime = performance.now();
+            }
+        }
+
+        // update bullets
+        for (let i = 0; i < bullets.length; i++) {
+            const b = bullets[i];
+            b.x += b.vx;
+            b.y += b.vy;
+            if (b.x < 0 || b.x > canvas.width || b.y < 0 || b.y > canvas.height) {
+                bullets.splice(i,1); i--; continue;
+            }
+            // Collision with remote player (if bullet owner is local and remote exists)
+            if (b.ownerId === localPlayerId && remotePlayer && !remotePlayer.dead) {
+                const dx = b.x - remotePlayer.x;
+                const dy = b.y - remotePlayer.y;
+                if (Math.hypot(dx, dy) < b.radius + remotePlayer.radius) {
+                    // HIT!
+                    bullets.splice(i,1); i--;
+                    localPlayer.score++;
+                    updateScoreUI();
+                    sendGameMessage("hit", { targetId: remotePlayerId, shooter: localPlayerId });
+                    // respawn remote slightly
+                    remotePlayer.x = Math.random() * (canvas.width - 100) + 50;
+                    remotePlayer.y = Math.random() * (canvas.height - 100) + 50;
+                }
+            }
+            // Collision with local player (if bullet from remote)
+            else if (b.ownerId !== localPlayerId && localPlayer) {
+                const dx = b.x - localPlayer.x;
+                const dy = b.y - localPlayer.y;
+                if (Math.hypot(dx, dy) < b.radius + localPlayer.radius) {
+                    bullets.splice(i,1); i--;
+                    remotePlayer.score++;
+                    updateScoreUI();
+                    // respawn local
+                    localPlayer.x = Math.random() * (canvas.width - 100) + 50;
+                    localPlayer.y = Math.random() * (canvas.height - 100) + 50;
+                    sendPositionUpdate(); // notify new position
+                }
+            }
+        }
+    }
+
+    function updateScoreUI() {
+        scoreDisplay.innerText = `🏆 YOU: ${localPlayer.score}  |  ENEMY: ${remotePlayer.score}`;
+    }
+
+    // DRAW everything
+    function draw() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        // background grid
+        ctx.strokeStyle = "#334155";
+        ctx.lineWidth = 1;
+        for (let i = 0; i < canvas.width; i += 50) {
+            ctx.beginPath(); ctx.moveTo(i,0); ctx.lineTo(i,canvas.height); ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(0,i); ctx.lineTo(canvas.width,i); ctx.stroke();
+        }
+        // remote player
+        ctx.shadowBlur = 0;
+        ctx.beginPath();
+        ctx.arc(remotePlayer.x, remotePlayer.y, remotePlayer.radius, 0, Math.PI*2);
+        ctx.fillStyle = "#ef4444";
+        ctx.fill();
+        ctx.strokeStyle = "#fca5a5";
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        ctx.fillStyle = "white";
+        ctx.font = "bold 14px monospace";
+        ctx.fillText("ENEMY", remotePlayer.x-22, remotePlayer.y-12);
+        // local player
+        ctx.beginPath();
+        ctx.arc(localPlayer.x, localPlayer.y, localPlayer.radius, 0, Math.PI*2);
+        ctx.fillStyle = "#3b82f6";
+        ctx.fill();
+        ctx.strokeStyle = "#bae6fd";
+        ctx.stroke();
+        ctx.fillStyle = "white";
+        ctx.fillText("YOU", localPlayer.x-14, localPlayer.y-12);
+        // bullets
+        for (let b of bullets) {
+            ctx.beginPath();
+            ctx.arc(b.x, b.y, 5, 0, Math.PI*2);
+            ctx.fillStyle = b.ownerId === localPlayerId ? "#facc15" : "#ff8c42";
+            ctx.fill();
+        }
+        // aim line
+        ctx.beginPath();
+        ctx.moveTo(localPlayer.x, localPlayer.y);
+        ctx.lineTo(mouseX, mouseY);
+        ctx.strokeStyle = "#facc1566";
+        ctx.setLineDash([5,8]);
+        ctx.stroke();
+        ctx.setLineDash([]);
+    }
+
+    // GAME LOOP
+    function gameLoop() {
+        updateGame();
+        draw();
+        requestAnimationFrame(gameLoop);
+    }
+
+    // ---- WEBRTC LOGIC (offer/answer with ICE gathering + encode to base64) ----
+    async function createOfferWithIceGathering() {
+        if (peerConnection) await peerConnection.close();
+        peerConnection = new RTCPeerConnection(configuration);
+        // host creates data channel
+        dataChannel = peerConnection.createDataChannel("gameChannel", { ordered: true });
+        setupDataChannelEvents();
+        setupPeerEvents();
+
+        const offer = await peerConnection.createOffer();
+        await peerConnection.setLocalDescription(offer);
+        // wait for ICE gathering to complete
+        await new Promise((resolve) => {
+            if (peerConnection.iceGatheringState === "complete") resolve();
+            else peerConnection.addEventListener("icegatheringstatechange", () => {
+                if (peerConnection.iceGatheringState === "complete") resolve();
+            });
+        });
+        const fullSdp = peerConnection.localDescription.sdp;
+        return fullSdp;
+    }
+
+    async function createAnswerFromOffer(offerSdp) {
+        if (peerConnection) await peerConnection.close();
+        peerConnection = new RTCPeerConnection(configuration);
+        setupPeerEvents();
+        // on data channel for guest
+        peerConnection.ondatachannel = (event) => {
+            dataChannel = event.channel;
+            setupDataChannelEvents();
+        };
+        await peerConnection.setRemoteDescription({ type: "offer", sdp: offerSdp });
+        const answer = await peerConnection.createAnswer();
+        await peerConnection.setLocalDescription(answer);
+        await new Promise((resolve) => {
+            if (peerConnection.iceGatheringState === "complete") resolve();
+            else peerConnection.addEventListener("icegatheringstatechange", () => {
+                if (peerConnection.iceGatheringState === "complete") resolve();
+            });
+        });
+        return peerConnection.localDescription.sdp;
+    }
+
+    async function applyAnswerToHost(answerSdp) {
+        if (!peerConnection) throw new Error("No peer connection");
+        await peerConnection.setRemoteDescription({ type: "answer", sdp: answerSdp });
+    }
+
+    function setupDataChannelEvents() {
+        if (!dataChannel) return;
+        dataChannel.onopen = () => {
+            connectionState = "connected";
+            updateStatusUI();
+            // send local player identity
+            dataChannel.send(JSON.stringify({ type: "init", id: localPlayerId }));
+        };
+        dataChannel.onclose = () => {
+            connectionState = "disconnected";
+            updateStatusUI();
+        };
+        dataChannel.onmessage = (event) => {
+            const msg = JSON.parse(event.data);
+            switch (msg.type) {
+                case "init":
+                    remotePlayerId = msg.id;
+                    remotePlayer.id = remotePlayerId;
+                    break;
+                case "move":
+                    if (remotePlayer) {
+                        remotePlayer.x = msg.x;
+                        remotePlayer.y = msg.y;
+                    }
+                    break;
+                case "shoot":
+                    applyRemoteShoot(msg);
+                    break;
+                case "hit":
+                    if (msg.targetId === localPlayerId) {
+                        remotePlayer.score++;
+                        updateScoreUI();
+                        localPlayer.x = Math.random() * (canvas.width - 100) + 50;
+                        localPlayer.y = Math.random() * (canvas.height - 100) + 50;
+                        sendPositionUpdate();
+                    } else if (msg.shooter === localPlayerId) {
+                        // already local counted
+                    }
+                    break;
+                default: break;
+            }
+        };
+    }
+
+    function setupPeerEvents() {
+        peerConnection.onconnectionstatechange = () => {
+            if (peerConnection.connectionState === "connected") connectionState = "connected";
+            else if (peerConnection.connectionState === "failed") connectionState = "disconnected";
+            else if (peerConnection.connectionState === "connecting") connectionState = "connecting";
+            updateStatusUI();
+        };
+        peerConnection.oniceconnectionstatechange = () => {};
+    }
+
+    async function resetConnection() {
+        if (dataChannel) dataChannel.close();
+        if (peerConnection) peerConnection.close();
+        peerConnection = null;
+        dataChannel = null;
+        connectionState = "disconnected";
+        remotePlayerId = null;
+        remotePlayer.score = 0;
+        remotePlayer.x = 650; remotePlayer.y = 300;
+        localPlayer.score = 0;
+        bullets = [];
+        updateScoreUI();
+        updateStatusUI();
+        inviteArea.style.display = "none";
+        generatedAnswerArea.innerHTML = "";
+        manualAnswerInput.value = "";
+        manualOfferInput.value = "";
+    }
+
+    // ---- UI HANDLERS: Host create room ----
+    createRoomBtn.onclick = async () => {
+        await resetConnection();
+        isHost = true;
+        connectionState = "connecting";
+        updateStatusUI();
+        try {
+            const offerSdp = await createOfferWithIceGathering();
+            localOfferSdp = offerSdp;
+            const encodedOffer = btoa(unescape(encodeURIComponent(offerSdp)));
+            const inviteUrl = `${window.location.href.split('#')[0]}#invite=${encodedOffer}`;
+            inviteLinkInput.value = inviteUrl;
+            inviteArea.style.display = "flex";
+            // copy link manually
+            copyLinkBtn.onclick = () => {
+                navigator.clipboard.writeText(inviteUrl);
+                alert("Invite link copied!");
+            };
+            // manual answer entry for guest answer
+            applyAnswerBtn.onclick = async () => {
+                const answerSdp = manualAnswerInput.value;
+                if (answerSdp && peerConnection) {
+                    await applyAnswerToHost(answerSdp);
+                    manualAnswerInput.value = "";
+                } else alert("Invalid answer SDP");
+            };
+        } catch (err) { console.error(err); alert("Failed to create room"); }
+    };
+
+    // auto decode invite from URL hash
+    window.addEventListener('load', async () => {
+        const hash = window.location.hash;
+        if (hash && hash.startsWith('#invite=')) {
+            await resetConnection();
+            isHost = false;
+            const encoded = hash.substring(8);
+            let offerSdp = "";
+            try {
+                offerSdp = decodeURIComponent(escape(atob(encoded)));
+            } catch(e) { console.error(e); }
+            if (offerSdp) {
+                manualOfferInput.value = offerSdp;
+                // auto apply offer
+                await applyOfferAndGenAnswer(offerSdp);
+            }
+        }
+    });
+
+    async function applyOfferAndGenAnswer(offerSdp) {
+        connectionState = "connecting";
+        updateStatusUI();
+        try {
+            const answerSdp = await createAnswerFromOffer(offerSdp);
+            generatedAnswerArea.innerHTML = `<strong>📤 ANSWER CODE (copy for host):</strong><br><textarea rows="3" style="width:100%" readonly>${answerSdp}</textarea>`;
+            // user manual copy, host will paste in input
+            connectionState = "connected"; // after answer creation, waiting remote set
+            updateStatusUI();
+        } catch(e) { alert("Error creating answer:"+e); }
+    }
+
+    applyOfferBtn.onclick = async () => {
+        const offerRaw = manualOfferInput.value;
+        if (!offerRaw) return;
+        await applyOfferAndGenAnswer(offerRaw);
+    };
+
+    resetConnBtn.onclick = async () => {
+        await resetConnection();
+        window.location.hash = "";
+        inviteArea.style.display = "none";
+    };
+
+    // ---- GAME CONTROLS ----
+    function handleKeyDown(e) {
+        const key = e.key.toLowerCase();
+        if (key === 'w') keys.w = true;
+        if (key === 's') keys.s = true;
+        if (key === 'a') keys.a = true;
+        if (key === 'd') keys.d = true;
+        if (key === ' ' || key === 'space') {
+            e.preventDefault();
+            shootBullet(mouseX, mouseY);
+        }
+    }
+    function handleKeyUp(e) {
+        const key = e.key.toLowerCase();
+        if (key === 'w') keys.w = false;
+        if (key === 's') keys.s = false;
+        if (key === 'a') keys.a = false;
+        if (key === 'd') keys.d = false;
+    }
+    function handleMouseMove(e) {
+        const rect = canvas.getBoundingClientRect();
+        const scaleX = canvas.width / rect.width;
+        const scaleY = canvas.height / rect.height;
+        mouseX = (e.clientX - rect.left) * scaleX;
+        mouseY = (e.clientY - rect.top) * scaleY;
+        mouseX = Math.min(Math.max(mouseX, 0), canvas.width);
+        mouseY = Math.min(Math.max(mouseY, 0), canvas.height);
+    }
+    function handleCanvasClick(e) {
+        shootBullet(mouseX, mouseY);
+    }
+
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
+    canvas.addEventListener('mousemove', handleMouseMove);
+    canvas.addEventListener('click', handleCanvasClick);
+    // initialize game loop
+    gameLoop();
+    resetConnection();
+    updateScoreUI();
+    setInterval(() => { if (connectionState === "connected" && dataChannel?.readyState === "open") sendPositionUpdate(); }, 80);
+</script>
+</body>
+</html>
